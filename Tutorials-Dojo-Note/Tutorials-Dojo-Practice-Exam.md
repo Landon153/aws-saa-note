@@ -1,0 +1,315 @@
+# Architecture Deep Dive
+
+## Monolithic Architecture
+- Fails together
+- Scales together
+- Billed together
+
+## Tiered Architecture
+- Each tier can be scaled independently 
+- Each tier connects to each
+- Enables horizontal scaling of individual tiers since a single endpoint (LB) is used to direct traffic between the tiers
+- Each tier has to be running something for the app to function
+  - Ex. Upload expects and REQUIRES Processing to respond
+
+## Event Driven Architecture
+- Producers, Consumers, or BOTH
+- No constant running or waiting for things
+- Producers generate events when something happens
+  - Clicks, errors, criteria met, uploads, actions
+- Events are delivered to consumers 
+  - Generally via Event Router
+  - Actions are taken and the system returns to waiting
+- Mature event-driven architecture only consumes resources while handling events
+  - serverless
+
+## AWS Lambda In-depth – Part 1
+- Function-as-a-Service (FaaS) – short running & focused
+- Lambda function – a piece of code lambda runs
+- Functions use a runtime – e.g. Python 3.8
+- Functions are loaded and run in a runtime environment
+- The environment has a direct memory (indirect vCPU) allocation
+- You are billed for the duration that a function runs
+- A key part of Serverless architectures
+- When a function is invoked, deployment package is sent to a Lambda environment. – 50 MB zipped, 250 MB unzipped
+  - Once arrived, executes within the runtime environment
+- Common Runtimes – Python, Ruby, Java, Go, C#
+- Custom runtimes such as Rust are possible using Layers
+- Stateless – every time a function is invoked, a new runtime environment is provided
+  - Above is default, can be configured for multiple invocations in a single runtime envionment
+- You directly control the memory allocated for Lambda functions whereas vCPU is allocated indirectly
+  - – 128 MB - 10240 MB
+- 1769 MB = 1vCPU
+- Runtime environment has disk memory mounted – 512 MB storage available as /tmp – default.
+  - Can scale up to 10240 MB
+- Lambda function can run max 900s (15minutes) 
+  - Function timeout
+- Use step functions for longer function flows
+- Execution Roles – IAM roles assumed by the Lambda function which provides permissions to interact with other AWS services
+- Common uses
+  - Serverless Applications (S3, API Gateway, Lambda)
+  - File Processing (S3, S3 Events, Lambda)
+  - Database Triggers (DynamoDB, Streams, Lambda)
+  - Serverless CRON (EventBridge/CWEvents + Lambda)
+  - Realtime Stream Data Processing (Kinesis + Lambda)
+
+## Lambda In-depth Part 2
+- Networking modes
+  - Public or VPC 
+- Public – by default, functions are given public networking. They can access public AWS services and the public internet
+  - E.g. SQS DynamoDB
+- Public networking offers the best performance because no customer specific VPC networking is required
+- Public Lambda functions have no access to VPC based services unless public IPs are provided and security controls allow external access
+- Typically the desired network configuration
+- Private (VPC) 
+  - Lambda is configured to execute in a private subnet
+- Private Lambda functions running in a VPC obey all VPC networking rules
+  - No access to internet based endpoints unless proper networking and permissions are configured
+- Use GWLB or VPC endpoints to access public endpoints (AWS + external)
+- NatGW and Internet GW are required for VPC lambdas to access internet resources
+- Private lambda needs ec2 network permissions (execution role)
+- Security
+  - Lambda Execution roles are IAM roles attached to lambda functions which control the PERMISSIONS the Lambda function RECEIVES
+  - Lambda Resource Policy controls WHAT service and accounts can INVOKE lambda functions
+    - E.g., sns, s3, or external services
+    - Only configurable via the CLI
+- Logging – 
+  - Lambda uses CloudWatch, CloudWatch Logs & X-Ray
+  - Logs from Lambda executions – CloudWatch Logs
+  - Metrics – invocation success/failure, retries, latency – stored in Cloud Watch
+  - Lambda can be integrated with X-Ray for distributed tracing
+  - CloudWatch Logs requires permissions via Execution Role – log information into CloudWatch Logs 
+
+## Lambda In-depth Part 3
+- Invocation
+  - Synchronous invocation
+  - Asynchronous invocation
+  - Event Source mappings
+- Synchronous Invocation – waits for complete/response pass/fail
+  - CLI / API invoke a lambda function, passing in data and wait for a response
+    - Lambda function responds with data or fails
+  - Lambda + API Gateway
+    - Client communicates with API GW – Proxied to Lambda function
+  - Result (Success or Failure) – returned during the request
+  - Errors or Retries have to be handled within the client
+  - Synchronous Invocation is typically used when a human is directly or indirectly invoking a Lambda function
+- Asynchronous Invocation – no waiting for complete
+  - Typically used when AWS services invoke Lambda functions
+  - Example - S3 isn’t waiting for any kind of response. The event is generated and S3 stops tracking
+  - If processing of the event fails, Lambda will retry between 0 and 2 times (configurable). Lambda handles the retry logic. 
+  - The lambda function code needs to be idempotent reprocessing as a result should have the same end state 
+    - Not additive/subtractive – use declarative 
+  - Events can be sent to dead letter queues after the automatic (configured) retries repeatedly fail processing. 
+  - Destinations – events processed by lambda functions can be delivered to another destination
+    - SQS, SNS, Lambda & EventBridge – where successful or failed events can be sent. 
+- Event Source Mapping Invocation – 
+  - Typically used on streams or queues which don’t support event generation to invoke lambda (polling required)– 
+    - Kinesis
+    - DynamoDB Streams 
+    - SQS
+  - Source Batches – data that is read (polled) from the source then processed by Lambda – size considerations – lambda times out after 900s (15 mins). 
+  - Because the services aren’t generating events, the data (source batch) requires permissions from the Lambda Execution role
+  - Event Source Mapping Permissions from the lambda execution role are used by the event source mapping to interact with the event source
+  - SQS queues or SNS topics can be used for any discarded or failed event batches – DLQ Failed Events (Failed Batch)
+- Lambda Versions – 
+  - Lambda functions have versions – v1, v2, v3
+  - A version is the code + the configuration of the lambda function
+  - It’s immutable – it never changes once published & has its own Amazon Resource Name
+  - $Latest points at the latest
+  - Aliases (ex. Dev, Stage, Prod) point at a version – can be changed
+- Execution Context – 
+  - The environment a lambda function runs in
+  - A cold start is a full creation and configuration including function code download
+    - 100s of ms – slow if interacting with humans, but OK for processing events from S3, SQS, etc.
+  - A warm start, the same execution context is reused. A new event is passed in but the execution context creation can be skipped.
+    - 1-2 ms
+  - A Lambda invocation can reuse an execution context but has to assume it can’t. If used infrequently contexts will be removed. Concurrent executions will use multiple (potentially new) contexts
+  - Provisioned Concurrency
+    - AWS will create and keep X contexts warm and ready to use – Improving start speeds
+  - Use the /tmp space to predownload something in the context 
+    - Or DB connections 
+
+## CloudWatch Events and EventBridge
+- If X happens, or at Y time(s) - do Z
+- EventBridge is CloudWatch Events v2 (*)
+- A default Event bus for the account – used by both
+- In CloudWatch Events this is the only bus (implicit)
+- EventBridge can have additional event busses
+- Rules match incoming events – or schedules 
+- Rule matches – Route the events to 1+ Targets – e.g Lambda
+- Event Pattern Rule – event matches In Event Bus
+- Schedule Rule – chron format
+- Events are JSON format
+
+## Serverless Architecture
+- Serverless isn’t one single thing
+- You manage few, if any servers – low overhead
+- Applications are a collection of small & specialized functions
+- Functions run in Stateless and Ephemeral environments – duration billing
+- Event-driven – consumption only when being used
+- FaaS is used where possible for compute functionality
+  - No consistent use for compute
+- Managed services are used where possible 
+  - S3, DynamoDB, OIDC
+
+## Simple Notification Service (SNS)
+- Public AWS Service – Network connectivity with Public Endpoint 
+- Coordinates the sending and delivery of messages
+  - Messages are <= 256KB payloads
+- SNS topics are the base entity of SNS
+  - Permissions and configurations
+- A publisher sends messages to a TOPIC
+- TOPICS have Subscribers which receive messages
+  - Message formats – 
+    - HTTP(s) Endpoints
+    - Email – JSON 
+    - SQS Queues
+    - Mobile Push Notifications
+    - SMS Messages
+    - Lambda Functions
+- SNS uses across AWS notification – CloudWatch & CloudFormation 
+- ASG can also be configured to scale based on SNS notifications
+- Can be accessed from public internet and other vpcs with proper networking configuration
+- By default, all subscribers receive all messages published to the topic
+  - Configure filter on subscribers to control 
+- Fanout – single SNS topic with multiple SQS queues as subscribers
+  - Create multiple related workloads
+- Features
+  - Delivery Status – HTTP, Lambda, SQS
+  - Delivery Retried – Reliable Delivery
+  - HA and Scalable – Regionally Resilient
+  - Server Side Encryption – SSE
+  - Cross-Account access – via TOPIC Policy (resource policy)
+
+## Step Functions
+- Long – running serverless workflow-based applications.
+- Some problems with Lambda
+  - Lambda is FaaS
+  - 15 minute max execution time
+  - Can be chained together – gets messy at scale
+  - Runtime Environments are stateless
+- Step Function State Machines
+  - Serverless workflow - START –> STATES -> END
+  - States are THINGS that occur
+  - Maximum Duration – 1 year
+  - Standard Workflow (Default) – 1 year execution limit
+  - Express Workflow – 5 minute
+    - High volume event processing workloads
+    - IOT, Streaming, Mobile app backend
+    - Highly transactional
+  - Started via API Gateway, IOT Rule, EventBridge, Lambda
+  - Generally used for backend processing
+  - Amazon States Language (ASL) – JSON Template
+  - IAM Role is used for permissions
+  - States – 
+    - Succeed & Fail
+    - Wait – waits for certain period of time or specific date and time
+    - Choice – allows the state to change based on the input
+      - Email Only
+      - Email and SMS
+      - SMS Only
+    - Parallel
+    - Map – takes action based on the item/input
+    - Task – single unit of work performed by a State Machine – integrates with: 
+      - Lambda
+      - Batch
+      - DynamoDB
+      - ECS
+      - SNS
+      - SQS
+      - Glue
+      - SageMaker
+      - EMR
+      - Step Functions
+
+## API Gateway 101
+- Create and Manage APIs
+- Endpoint/entry-point for applications
+- Sits between applications & integrations (services)
+- Highly available, scalable, handles authorization, throttling, caching, CORS (secure cross domain), transformations, OpenAPI spec (third-party API integration) direct integration with a range of AWS services.
+- Public Service
+  - Can connect to services/endpoints in AWS or on-premises
+- Supported types:
+  - HTTP APIs
+  - REST APIs
+  - WebSocket APIs
+- Phases –
+  - Request
+    - Authorize, Transform, Validate
+  - Client
+    - Action taken via integrated service – DDB, SNS, Step Functions, HTTP Endpoints, Lambda
+  - Response
+    - Transform, Prepare, Return
+- CloudWatch Logs can store and manage full state request and response logs.
+- CloudWatch can store metrics for client and integration sides
+- API Gateway cache can be used to reduce the number of calls made to backend integrations and improve client performance
+- API Gateway Authentication
+  - Cognito User Pools 
+    - Client authenticates with cognito and receives a token if successful auth, passed to services
+  - Lambda Based Authorization
+    - Formerly known as Custom Authentication
+    - Client calls API Gateway with a bearer token (ID)
+    - Lambda authorizer called – checks local user store or external ID provider
+      - IAM policy and principal identifier
+    - API Gateway handles return request via Lambda integration or returns error 403 ACCESS_DENIED to client
+- API Gateway Endpoint Types
+  - Edge Optimized
+    - Any incoming requests are routed to the nearest CloudFront POP (Presence)
+  - Regional
+    - Clients in the same region
+    - Doesn’t use CF network
+    - Low overhead
+  - Private
+    - Only accessible within a VPC via an interface endpoint
+- API Gateway Stages 
+  - APIs are deployed to stages – each stage has one deployment
+  - Rollback supported
+  - Canary deployments 
+    - If enabled – deployments are made to the canary not the stage
+    - Canary = sub part of a Stage
+    - Stages enabled for canary deployments can be configured so a percentage of traffic is sent to the canary. 
+      - This can be adjusted over time or the canary can be promoted to make it the new base stage
+- API Gateway – ERRORS
+  - 4XX – Client Error – Invalid request on client side
+  - 5XX – Server Error – Valid request, backend issue
+  - 400 – Bad Request – Generic
+  - 403 – Access Denied – Authorizer denies OR WAF Filtered 
+  - 429 – API Gateway can throttle – this means you’ve exceeded that amount (configured)
+  - 502 – Bad Gateway Exception – bad output returned by lambda (backend compute error)
+  - 503 – Service Unavailable – backing endpoint offline? Major Service issues
+  - 504 – Integration Failure/Timeout – 29s (Backed by Lambda/Limitation of Lambda)
+- API Gateway – Caching
+  - Caching is configured per Stage
+  - Cache TTL default is 300 seconds
+    - Configured 0 and max 3600s
+  - Can be encrypted
+  - Cache size – 500MB to 237 GB
+  - Calls are only made to backend integrations if request is a cache miss
+  - Benefits – Reduced load & cost + improved performance
+
+## Simple Queue Service (SQS)
+- Public, Fully Managed, Highly – Available Queues 
+  - Standard or FIFO
+- Messaged up to 256 KB in size
+  - Alternatively, use S3 and link it if data is larger – not best case, but workaround
+- Received messaged are hidden (VisibilityTimeout)
+  - Then either reappear (retry) or are explicitly deleted
+- Dead-Letter queues can be used for problem messages
+  - Allow you to perform different sets of actions based on the type of message
+- Use
+  - Decouple application components 
+  - Allow asynchronous messaging
+  - Implementation of worker pools
+  - ASGs can scale and Lambdas invoke based on Queue length
+- Standard = at least once
+- FIFO = exactly once
+- FIFO (Performance) - 3,000 messages per second with batching, or up to 300 messages per second without 
+  - Not ideal for highly performant applications due to limited scaling capabilities
+- Standard – nearly infinite + ability to scale greatly
+- Billed based on “requests”
+- 1 request  
+  - 1-10 messages
+  - Up to 64 KB total
+- Short polling (immediate) vs. Long (waitTimeSeconds) Polling
+- Short polling 
+  -
